@@ -1,0 +1,6 @@
+streamlit==1.32.0
+moviepy==1.0.3
+elevenlabs==0.2.27
+requests==2.31.0
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
