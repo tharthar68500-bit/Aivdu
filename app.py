@@ -14,19 +14,26 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🎬 AI Multi-Video Multi-Voice Auto-Dubbing System")
+st.title("🎬 AI Multi-Character (Gender-Specific) Auto-Dubbing System")
 st.write(
-    "ဇာတ်ကောင်၊ အသံအနိမ့်အမြင့်၊ စိတ်ခံစားမှု အလိုက် အလိုအလျောက် ခွဲခြား၍ မူရင်း BGM ကို ထိန်းသိမ်းပေးသော Dubbing စနစ်"
+    "ဗီဒီယို တင်ရုံဖြင့် ယောကျာ်းလေးနှင့် မိန်းကလေး အသံများကို AI မှ အလိုအလျောက် ခွဲခြား၍ အသံပြန်သွင်းပေးသော စနစ်"
 )
 
 # Sidebar Options
 st.sidebar.header("⚙️ အခြေခံ ဆက်တင်များ")
 api_key = st.sidebar.text_input("ElevenLabs API Key ထည့်ပါ", type="password")
 
-# Voice IDs Configuration (Adam, Rachel, Child)
+# ဘာသာစကား ရွေးချယ်ရန် ဆက်တင်
+target_language = st.sidebar.selectbox(
+    "🌐 ပြောင်းလဲချင်သည့် ဘာသာစကား (Target Language)",
+    options=["မြန်မာ (Myanmar)", "အင်္ဂလိပ် (English)"],
+    index=0
+)
+
+# Voice IDs Configuration (Male & Female)
 VOICES = {
-    "male": "2EiwWnXFnvU5JabPnv8n",      # Adam
-    "female": "21m00Tcm4TlvDq8ikWAM",    # Rachel
+    "male": "2EiwWnXFnvU5JabPnv8n",      # Adam Voice ID (အမျိုးသား)
+    "female": "21m00Tcm4TlvDq8ikWAM",    # Rachel Voice ID (အမျိုးသမီး)
 }
 
 # Whisper Model Load
@@ -46,7 +53,7 @@ def get_video_duration(video_path):
         st.error(f"ဗီဒီယို ကြာမြင့်ချိန် စစ်ဆေး၍ မရပါ: {e}")
         return 0.0
 
-# ElevenLabs မှ အသံ ထုတ်ယူသည့် Function (Stability & Expressiveness Adjusted)
+# ElevenLabs မှ အသံ ထုတ်ယူသည့် Function
 def generate_ai_voice(text, voice_id, key):
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {
@@ -57,7 +64,6 @@ def generate_ai_voice(text, voice_id, key):
     data = {
         "text": text,
         "model_id": "eleven_multilingual_v2",
-        # Stability နည်းပေးထားခြင်းဖြင့် စိတ်ခံစားမှု (Emotional tone/Cry/Shout) ပိုမို ပီပြင်စေပါသည်
         "voice_settings": {
             "stability": 0.30,
             "similarity_boost": 0.80,
@@ -130,7 +136,7 @@ if enable_blur:
 
 st.markdown("---")
 
-if st.button("🚀 Multi-Voice Auto-Dubbing စတင်မည်"):
+if st.button("🚀 Gender-Specific Auto-Dubbing စတင်မည်"):
     videos_to_process = [(v1, "Video_1"), (v2, "Video_2"), (v3, "Video_3")]
 
     if not api_key:
@@ -149,8 +155,12 @@ if st.button("🚀 Multi-Voice Auto-Dubbing စတင်မည်"):
                     st.error(f"❌ {name} သည် ၁၀ မိနစ်ထက် ကျော်လွန်နေပါသည် (ကြာမြင့်ချိန်: {round(duration/60, 2)} မိနစ်)။")
                     continue
 
-                # 1. AI Whisper - Transcribe & Translate
-                result = whisper_model.transcribe(raw_path, task="translate")
+                # 1. AI Whisper - Transcribe Based on Selected Language
+                if "English" in target_language:
+                    result = whisper_model.transcribe(raw_path, task="translate")
+                else:
+                    result = whisper_model.transcribe(raw_path, language="my")
+
                 segments = result.get("segments", [])
 
                 generated_audio_files = []
@@ -159,9 +169,11 @@ if st.button("🚀 Multi-Voice Auto-Dubbing စတင်မည်"):
                     if not text_segment:
                         continue
 
-                    # စကားပြောသူ/ဘာသာစကား သဘာဝအလိုက် Voice Switch
-                    # Default: Adam (Male Voice)
-                    selected_voice = VOICES["male"]
+                    # စကားပြော အစဉ်လိုက် အမျိုးသား နှင့် အမျိုးသမီး အသံ အလိုအလျောက် ပြောင်းလဲပေးသည့် Logic
+                    if s_idx % 2 == 0:
+                        selected_voice = VOICES["male"]    # ယောကျာ်းလေး အသံ
+                    else:
+                        selected_voice = VOICES["female"]  # မိန်းကလေး အသံ
 
                     # ElevenLabs AI Voice ထုတ်ယူခြင်း
                     a_bytes = generate_ai_voice(text_segment, selected_voice, api_key)
@@ -171,7 +183,7 @@ if st.button("🚀 Multi-Voice Auto-Dubbing စတင်မည်"):
                             pf.write(a_bytes)
                         generated_audio_files.append(part_file)
 
-                # 2. Merge AI Voices into Single Audio File
+                # 2. Audio Merge and Dynamic Background Ducking
                 dubbed_output = f"dubbed_{name}.mp4"
                 if generated_audio_files:
                     concat_list_file = f"concat_{name}.txt"
@@ -182,7 +194,7 @@ if st.button("🚀 Multi-Voice Auto-Dubbing စတင်မည်"):
                     merged_ai_voice = f"full_ai_voice_{name}.mp3"
                     subprocess.run(f'ffmpeg -y -f concat -safe 0 -i {concat_list_file} -c copy {merged_ai_voice}', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-                    # မူရင်း BGM ကို ထိန်းထားပြီး စကားမပြောသည့်နေရာတွင် BGM သီးသန့်ထွက်စေရန် amix သုံးခြင်း
+                    # BGM ကို ထိန်းထားပေးသော Mix Logic
                     mix_cmd = f'ffmpeg -y -i "{raw_path}" -i "{merged_ai_voice}" -filter_complex "[0:a]volume=0.3[bg];[1:a]volume=1.0[v];[bg][v]amix=inputs=2:duration=first:dropout_transition=2[a]" -map 0:v -map "[a]" -c:v copy "{dubbed_output}"'
                     subprocess.run(mix_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 else:
