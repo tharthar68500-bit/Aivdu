@@ -1,8 +1,8 @@
-
 streamlit
 openai-whisper
 torch
 requests
 numpy
 soundfile
+huggingface_hub
 myanmartts
