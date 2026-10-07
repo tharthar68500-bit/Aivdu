@@ -4,3 +4,5 @@ elevenlabs
 requests
 numpy
 opencv-python-headless
+ffmpeg-python
+imageio-ffmpeg
