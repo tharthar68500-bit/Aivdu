@@ -1,196 +1,167 @@
 import os
-import subprocess
+import time
 import tempfile
+import subprocess
 from pathlib import Path
 
-import requests
-import soundfile as sf
 import streamlit as st
+import requests
+import torch
+import soundfile as sf
 import whisper
 
-from myanmar_tts import MyanmarTTS
+from huggingface_hub import hf_hub_download
+from api import StableTTSAPI
+from burmese import burmese_to_ipa2
 
 
 # =========================================================
-# PAGE
+# PAGE CONFIG
 # =========================================================
 
 st.set_page_config(
-    page_title="Chinese → Myanmar AI Dubbing",
+    page_title="AI Myanmar Drama Dubbing",
     page_icon="🎬",
-    layout="wide",
+    layout="wide"
 )
 
-st.title("🎬 Chinese → Myanmar AI Auto-Dubbing")
-
-st.write(
-    "တရုတ် Drama Video ထည့်ပါ → "
-    "တရုတ်စကားကို စာသားပြောင်း → "
-    "မြန်မာလို ဘာသာပြန် → "
-    "မြန်မာအသံပြန်သွင်း → MP4 ထုတ်"
+st.title("🎬 AI Myanmar Drama Auto Dubbing")
+st.caption(
+    "Chinese Video → Whisper → Myanmar Translation → Myanmar Voice → Final MP4"
 )
 
 
 # =========================================================
-# SETTINGS
-# =========================================================
-
-st.sidebar.header("⚙️ Settings")
-
-whisper_size = st.sidebar.selectbox(
-    "Whisper Model",
-    ["base", "small"],
-    index=0,
-)
-
-keep_chinese = st.sidebar.checkbox(
-    "မူရင်းတရုတ်အသံ အနည်းငယ်ထားမည်",
-    value=False,
-)
-
-if keep_chinese:
-    chinese_volume = st.sidebar.slider(
-        "Chinese Original Volume",
-        0.0,
-        0.20,
-        0.03,
-        0.01,
-    )
-else:
-    chinese_volume = 0.0
-
-
-# =========================================================
-# LOAD WHISPER
+# FUNCTIONS
 # =========================================================
 
 @st.cache_resource
-def load_whisper(model_name):
-    return whisper.load_model(model_name)
+def load_whisper():
+    """
+    Whisper model
+    """
+    return whisper.load_model("base")
 
-
-# =========================================================
-# LOAD MYANMAR TTS
-# =========================================================
 
 @st.cache_resource
 def load_myanmar_tts():
-    # CPU သုံးရန်
-    return MyanmarTTS(device="cpu")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    st.info(
+        f"🇲🇲 Myanmar TTS model ကို {device.upper()} နဲ့ ဖွင့်နေပါတယ်..."
+    )
+
+    # CPU မှာ fp32 သုံး
+    # GPU ရှိရင် fp16 သုံးနိုင်
+    if device == "cuda":
+        model_file = "model_fp16.pt"
+    else:
+        model_file = "model_fp32.pt"
+
+    model_path = hf_hub_download(
+        repo_id="freococo/MyanmarTTS",
+        filename=model_file
+    )
+
+    vocos_path = hf_hub_download(
+        repo_id="freococo/MyanmarTTS",
+        filename="vocos.pt"
+    )
+
+    ref_path = hf_hub_download(
+        repo_id="freococo/MyanmarTTS",
+        filename="samples/sample_0.wav"
+    )
+
+    model = StableTTSAPI(
+        model_path,
+        vocos_path,
+        "vocos"
+    ).to(device)
+
+    model.g2p_mapping["burmese"] = burmese_to_ipa2
+
+    return model, ref_path
 
 
-# =========================================================
-# VIDEO DURATION
-# =========================================================
+def translate_chinese_to_myanmar(text):
 
-def get_duration(video_path):
-
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        str(video_path),
-    ]
-
-    try:
-
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-
-        return float(result.stdout.strip())
-
-    except Exception as e:
-
-        st.error(
-            f"Video duration မဖတ်နိုင်ပါ: {e}"
-        )
-
-        return 0
-
-
-# =========================================================
-# CHINESE → MYANMAR TRANSLATION
-# =========================================================
-
-def translate_to_myanmar(text):
-
-    if not text.strip():
+    if not text or not text.strip():
         return ""
 
     try:
 
-        url = (
-            "https://translate.googleapis.com/"
-            "translate_a/single"
-        )
+        url = "https://translate.googleapis.com/translate_a/single"
 
         params = {
             "client": "gtx",
-            "sl": "auto",
+            "sl": "zh-CN",
             "tl": "my",
             "dt": "t",
-            "q": text,
+            "q": text
         }
 
         response = requests.get(
             url,
             params=params,
-            timeout=20,
+            timeout=30
         )
 
         response.raise_for_status()
 
         data = response.json()
 
-        translated = ""
+        result = ""
 
         for item in data[0]:
+            if item[0]:
+                result += item[0]
 
-            if item and item[0]:
-                translated += item[0]
-
-        return translated.strip()
+        return result.strip()
 
     except Exception as e:
 
         st.warning(
-            f"ဘာသာပြန် Error: {e}"
+            f"ဘာသာပြန်ရာမှာ Error ဖြစ်ပါတယ်: {e}"
         )
 
         return text
 
 
-# =========================================================
-# MYANMAR TTS
-# =========================================================
-
 def create_myanmar_voice(
     tts,
+    ref_path,
     text,
-    output_path,
+    output_path
 ):
 
     try:
 
-        audio = tts.tts(
+        if not text.strip():
+            return False
+
+        audio, _ = tts.inference(
             text,
-            solver="euler",
+            ref_path,
+            "burmese",
             step=12,
-            cfg=3.0,
+            solver="euler",
+            cfg=3.0
+        )
+
+        audio = (
+            audio
+            .squeeze(0)
+            .detach()
+            .cpu()
+            .numpy()
         )
 
         sf.write(
             str(output_path),
             audio,
-            44100,
+            44100
         )
 
         return True
@@ -198,122 +169,66 @@ def create_myanmar_voice(
     except Exception as e:
 
         st.error(
-            f"Myanmar TTS Error: {e}"
+            f"🇲🇲 Myanmar TTS Error: {e}"
         )
 
         return False
 
 
-# =========================================================
-# GET AUDIO DURATION
-# =========================================================
+def get_audio_duration(audio_file):
 
-def get_audio_duration(audio_path):
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(audio_file)
+        ],
+        capture_output=True,
+        text=True
+    )
 
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        str(audio_path),
-    ]
-
-    try:
-
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-
-        return float(
-            result.stdout.strip()
-        )
-
-    except:
-
-        return 0
+    return float(result.stdout.strip())
 
 
-# =========================================================
-# FIT TTS AUDIO TO ORIGINAL DIALOGUE TIME
-# =========================================================
-
-def fit_audio(
+def fit_audio_to_duration(
     input_audio,
     output_audio,
-    target_duration,
+    target_duration
 ):
-
-    current_duration = get_audio_duration(
-        input_audio
-    )
-
-    if current_duration <= 0:
-        return False
-
-    if target_duration <= 0:
-        return False
-
-    ratio = (
-        current_duration /
-        target_duration
-    )
-
-    filters = []
-
-    while ratio > 2.0:
-
-        filters.append(
-            "atempo=2.0"
-        )
-
-        ratio /= 2.0
-
-    while ratio < 0.5:
-
-        filters.append(
-            "atempo=0.5"
-        )
-
-        ratio /= 0.5
-
-    if abs(ratio - 1.0) > 0.01:
-
-        filters.append(
-            f"atempo={ratio:.4f}"
-        )
-
-    if not filters:
-        filters.append("anull")
-
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(input_audio),
-        "-filter:a",
-        ",".join(filters),
-        "-t",
-        str(target_duration),
-        "-ar",
-        "44100",
-        "-ac",
-        "2",
-        str(output_audio),
-    ]
 
     try:
 
+        current_duration = get_audio_duration(
+            input_audio
+        )
+
+        if current_duration <= 0:
+            return False
+
+        speed = current_duration / target_duration
+
+        # atempo supports 0.5 - 2.0
+        speed = max(0.5, min(2.0, speed))
+
         subprocess.run(
-            command,
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(input_audio),
+                "-filter:a",
+                f"atempo={speed}",
+                "-t",
+                str(target_duration),
+                str(output_audio)
+            ],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
+            stderr=subprocess.DEVNULL
         )
 
         return True
@@ -323,362 +238,214 @@ def fit_audio(
         return False
 
 
-# =========================================================
-# CREATE SILENCE
-# =========================================================
-
-def create_silence(
-    output_file,
-    duration,
+def create_silent_audio(
+    output_audio,
+    duration
 ):
-
-    command = [
-        "ffmpeg",
-        "-y",
-        "-f",
-        "lavfi",
-        "-i",
-        "anullsrc=channel_layout=stereo:"
-        "sample_rate=44100",
-        "-t",
-        str(duration),
-        "-c:a",
-        "pcm_s16le",
-        str(output_file),
-    ]
 
     subprocess.run(
-        command,
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=mono",
+            "-t",
+            str(duration),
+            str(output_audio)
+        ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True,
+        stderr=subprocess.DEVNULL
     )
 
 
-# =========================================================
-# CREATE TIMED DUBBING TRACK
-# =========================================================
-
-def create_dubbing_track(
-    video_duration,
-    segments,
-    output_audio,
+def create_final_video(
+    video_file,
+    dubbed_audio,
+    output_file
 ):
 
-    if not segments:
-        return False
-
-    temp_dir = output_audio.parent
-
-    silence_file = (
-        temp_dir /
-        "silence.wav"
-    )
-
-    create_silence(
-        silence_file,
-        video_duration,
-    )
-
-    inputs = [
-        "-i",
-        str(silence_file),
-    ]
-
-    filters = [
-        "[0:a]anull[base]"
-    ]
-
-    for index, segment in enumerate(
-        segments
-    ):
-
-        inputs.extend([
-            "-i",
-            str(segment["file"]),
-        ])
-
-        delay = int(
-            segment["start"] * 1000
-        )
-
-        filters.append(
-            f"[{index + 1}:a]"
-            f"adelay={delay}|{delay}"
-            f"[a{index}]"
-        )
-
-    mix = "[base]"
-
-    for index in range(
-        len(segments)
-    ):
-        mix += f"[a{index}]"
-
-    filters.append(
-        f"{mix}"
-        f"amix="
-        f"inputs={len(segments) + 1}:"
-        f"duration=first:"
-        f"dropout_transition=0"
-        f"[out]"
-    )
+    """
+    Original Chinese audio ကို မယူဘဲ
+    Myanmar dubbed audio တစ်ခုတည်းထည့်မယ်။
+    """
 
     command = [
         "ffmpeg",
         "-y",
-        *inputs,
-        "-filter_complex",
-        ";".join(filters),
+
+        "-i",
+        str(video_file),
+
+        "-i",
+        str(dubbed_audio),
+
         "-map",
-        "[out]",
+        "0:v:0",
+
+        "-map",
+        "1:a:0",
+
+        "-c:v",
+        "copy",
+
         "-c:a",
         "aac",
+
         "-b:a",
         "192k",
-        "-t",
-        str(video_duration),
-        str(output_audio),
+
+        "-shortest",
+
+        str(output_file)
     ]
 
-    try:
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True
+    )
 
-        subprocess.run(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            check=True,
-        )
-
-        return True
-
-    except subprocess.CalledProcessError as e:
+    if result.returncode != 0:
 
         st.error(
-            "Dubbing track Error:\n"
-            + e.stderr.decode(
-                errors="ignore"
-            )[-2000:]
+            "Final Video ပြုလုပ်ရာမှာ Error ဖြစ်ပါတယ်\n\n"
+            + result.stderr[-3000:]
         )
 
         return False
 
+    return True
+
 
 # =========================================================
-# CREATE FINAL VIDEO
+# SIDEBAR
 # =========================================================
 
-def create_final_video(
-    original_video,
-    dubbing_audio,
-    output_video,
-):
+st.sidebar.header("⚙️ Settings")
 
-    if keep_chinese:
+whisper_model_name = st.sidebar.selectbox(
+    "Whisper Model",
+    [
+        "base",
+        "small"
+    ],
+    index=0
+)
 
-        filter_complex = (
-            f"[0:a]volume={chinese_volume}"
-            "[original];"
-            "[1:a]volume=1.0[dub];"
-            "[original][dub]"
-            "amix=inputs=2:"
-            "duration=first:"
-            "dropout_transition=0"
-            "[audio]"
-        )
-
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(original_video),
-            "-i",
-            str(dubbing_audio),
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            "0:v:0",
-            "-map",
-            "[audio]",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            str(output_video),
-        ]
-
-    else:
-
-        # IMPORTANT:
-        # Chinese original audio is removed.
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(original_video),
-            "-i",
-            str(dubbing_audio),
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-shortest",
-            str(output_video),
-        ]
-
-    try:
-
-        subprocess.run(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            check=True,
-        )
-
-        return True
-
-    except subprocess.CalledProcessError as e:
-
-        st.error(
-            e.stderr.decode(
-                errors="ignore"
-            )[-3000:]
-        )
-
-        return False
+st.sidebar.info(
+    "🇨🇳 Chinese audio ကိုဖတ်ပြီး "
+    "🇲🇲 မြန်မာလို ဘာသာပြန်ကာ "
+    "Myanmar TTS နဲ့ အသံပြန်ထည့်ပေးပါတယ်။"
+)
 
 
 # =========================================================
 # VIDEO UPLOAD
 # =========================================================
 
-st.subheader(
-    "📹 တရုတ် Drama Video ထည့်ပါ"
-)
-
-video_file = st.file_uploader(
-    "MP4 / MOV / MKV",
-    type=[
-        "mp4",
-        "mov",
-        "mkv",
-    ],
+uploaded_video = st.file_uploader(
+    "🎥 Chinese Drama Video တင်ပါ",
+    type=["mp4", "mov", "mkv"]
 )
 
 
 # =========================================================
-# START
+# MAIN
 # =========================================================
 
-if st.button(
-    "🚀 မြန်မာ Dubbing စတင်မည်",
-    type="primary",
-):
+if uploaded_video:
 
-    if video_file is None:
+    st.video(uploaded_video)
 
-        st.warning(
-            "⚠️ Video အရင်ထည့်ပါ။"
-        )
-
-        st.stop()
-
-    work_dir = Path(
-        tempfile.mkdtemp(
-            prefix="mm_dub_"
-        )
+    start_button = st.button(
+        "🚀 Myanmar Dubbing စလုပ်မယ်",
+        type="primary",
+        use_container_width=True
     )
 
-    try:
+    if start_button:
 
-        # ---------------------------------------------
-        # SAVE VIDEO
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # TEMP DIRECTORY
+        # -------------------------------------------------
+
+        work_dir = Path(
+            tempfile.mkdtemp(
+                prefix="myanmar_dubbing_"
+            )
+        )
 
         input_video = (
             work_dir /
-            "input.mp4"
+            uploaded_video.name
         )
 
         with open(
             input_video,
-            "wb",
+            "wb"
         ) as f:
 
             f.write(
-                video_file.getbuffer()
+                uploaded_video.getbuffer()
             )
-
-        duration = get_duration(
-            input_video
-        )
-
-        if duration <= 0:
-
-            st.error(
-                "❌ Video မဖတ်နိုင်ပါ။"
-            )
-
-            st.stop()
-
-        if duration > 600:
-
-            st.error(
-                "❌ 10 မိနစ်ထက် မကျော်ရပါ။"
-            )
-
-            st.stop()
 
         st.success(
-            f"Video Duration: "
-            f"{duration:.2f} seconds"
+            "Video upload ပြီးပါပြီ။"
         )
 
-
-        # ---------------------------------------------
-        # LOAD AI
-        # ---------------------------------------------
-
-        with st.spinner(
-            "🧠 Whisper AI ဖွင့်နေပါသည်..."
-        ):
-
-            whisper_model = load_whisper(
-                whisper_size
-            )
-
-        with st.spinner(
-            "🇲🇲 Myanmar TTS ဖွင့်နေပါသည်..."
-        ):
-
-            myanmar_tts = (
-                load_myanmar_tts()
-            )
-
-
-        # ---------------------------------------------
+        # -------------------------------------------------
         # WHISPER
-        # ---------------------------------------------
+        # -------------------------------------------------
 
-        with st.spinner(
-            "🎧 တရုတ်စကားကို ဖတ်နေပါသည်..."
-        ):
+        progress = st.progress(0)
 
-            result = whisper_model.transcribe(
+        status = st.empty()
+
+        status.info(
+            "🎙️ Whisper ကို load လုပ်နေပါတယ်..."
+        )
+
+        try:
+
+            model = load_whisper()
+
+        except Exception as e:
+
+            st.error(
+                f"Whisper Load Error: {e}"
+            )
+
+            st.stop()
+
+        progress.progress(10)
+
+        # -------------------------------------------------
+        # TRANSCRIPTION
+        # -------------------------------------------------
+
+        status.info(
+            "🇨🇳 Chinese စကားပြောတွေကို "
+            "timestamp နဲ့ ဖတ်နေပါတယ်..."
+        )
+
+        try:
+
+            result = model.transcribe(
                 str(input_video),
                 language="zh",
                 task="transcribe",
-                fp16=False,
-                verbose=False,
+                fp16=torch.cuda.is_available()
             )
+
+        except Exception as e:
+
+            st.error(
+                f"Whisper Error: {e}"
+            )
+
+            st.stop()
 
         segments = result.get(
             "segments",
@@ -688,200 +455,251 @@ if st.button(
         if not segments:
 
             st.error(
-                "❌ တရုတ်စကားပြော မတွေ့ပါ။"
+                "Chinese dialogue မတွေ့ပါ။"
             )
 
             st.stop()
 
+        progress.progress(25)
+
         st.success(
-            f"📝 Dialogue "
-            f"{len(segments)} ခု တွေ့ပါသည်။"
+            f"📝 Dialogue {len(segments)} ခု တွေ့ပါတယ်။"
         )
 
+        # -------------------------------------------------
+        # MYSQL TTS LOAD
+        # -------------------------------------------------
 
-        # ---------------------------------------------
-        # TRANSLATE + TTS
-        # ---------------------------------------------
+        status.info(
+            "🇲🇲 Myanmar TTS model ကို load လုပ်နေပါတယ်..."
+        )
 
-        dubbing_segments = []
+        try:
 
-        progress = st.progress(0)
+            myanmar_tts, myanmar_ref = (
+                load_myanmar_tts()
+            )
+
+        except Exception as e:
+
+            st.error(
+                "Myanmar TTS model load မဖြစ်ပါ။\n\n"
+                f"{e}"
+            )
+
+            st.stop()
+
+        progress.progress(35)
+
+        # -------------------------------------------------
+        # GET VIDEO DURATION
+        # -------------------------------------------------
+
+        video_duration = get_audio_duration(
+            input_video
+        )
+
+        # -------------------------------------------------
+        # CREATE FULL DUBBED AUDIO
+        # -------------------------------------------------
+
+        full_audio = (
+            work_dir /
+            "full_myanmar_audio.wav"
+        )
+
+        segment_audio_files = []
+
+        status.info(
+            "🇨🇳 Chinese → 🇲🇲 Myanmar ဘာသာပြန်ပြီး "
+            "အသံထုတ်နေပါတယ်..."
+        )
+
+        # Start with silence
+        create_silent_audio(
+            full_audio,
+            video_duration
+        )
+
+        # -------------------------------------------------
+        # PROCESS EACH SEGMENT
+        # -------------------------------------------------
 
         for index, segment in enumerate(
             segments
         ):
 
-            chinese_text = segment.get(
-                "text",
-                ""
-            ).strip()
-
-            start = float(
-                segment.get(
-                    "start",
-                    0
-                )
+            start_time = float(
+                segment["start"]
             )
 
-            end = float(
-                segment.get(
-                    "end",
-                    start
-                )
+            end_time = float(
+                segment["end"]
             )
 
-            target_duration = (
-                end - start
+            duration = (
+                end_time -
+                start_time
+            )
+
+            chinese_text = (
+                segment["text"]
+                .strip()
             )
 
             if not chinese_text:
                 continue
 
-            if target_duration <= 0:
-                continue
+            # ---------------------------------------------
+            # TRANSLATE
+            # ---------------------------------------------
 
-            st.markdown(
-                f"### #{index + 1}"
+            myanmar_text = (
+                translate_chinese_to_myanmar(
+                    chinese_text
+                )
             )
 
+            # ---------------------------------------------
+            # SHOW CURRENT
+            # ---------------------------------------------
+
             st.write(
-                f"⏱️ "
-                f"{start:.2f}s → "
-                f"{end:.2f}s"
+                f"**Scene {index + 1}**"
             )
 
             st.write(
                 f"🇨🇳 {chinese_text}"
             )
 
-
-            # -----------------------------------------
-            # TRANSLATION
-            # -----------------------------------------
-
-            myanmar_text = (
-                translate_to_myanmar(
-                    chinese_text
-                )
-            )
-
             st.write(
                 f"🇲🇲 {myanmar_text}"
             )
 
-            if not myanmar_text:
-                continue
-
-
-            # -----------------------------------------
-            # TTS
-            # -----------------------------------------
+            # ---------------------------------------------
+            # CREATE TTS
+            # ---------------------------------------------
 
             raw_audio = (
                 work_dir /
-                f"raw_{index}.wav"
+                f"tts_{index}.wav"
             )
 
             fitted_audio = (
                 work_dir /
-                f"fit_{index}.wav"
+                f"tts_fit_{index}.wav"
             )
 
-            with st.spinner(
-                f"🎙️ Myanmar အသံ "
-                f"#{index + 1} ထုတ်နေပါသည်..."
-            ):
-
-                created = (
-                    create_myanmar_voice(
-                        myanmar_tts,
-                        myanmar_text,
-                        raw_audio,
-                    )
-                )
+            created = create_myanmar_voice(
+                myanmar_tts,
+                myanmar_ref,
+                myanmar_text,
+                raw_audio
+            )
 
             if not created:
                 continue
 
+            # ---------------------------------------------
+            # FIT TTS TO ORIGINAL TIMING
+            # ---------------------------------------------
 
-            # -----------------------------------------
-            # FIT TIMING
-            # -----------------------------------------
-
-            fitted = fit_audio(
+            fitted = fit_audio_to_duration(
                 raw_audio,
                 fitted_audio,
-                target_duration,
+                duration
             )
 
             if not fitted:
                 continue
 
-            dubbing_segments.append(
-                {
-                    "file": fitted_audio,
-                    "start": start,
-                    "end": end,
-                }
-            )
-
-            progress.progress(
-                min(
-                    1.0,
-                    (index + 1)
-                    / len(segments)
+            segment_audio_files.append(
+                (
+                    start_time,
+                    fitted_audio
                 )
             )
 
+            # ---------------------------------------------
+            # PUT AUDIO INTO TIMELINE
+            # ---------------------------------------------
 
-        # ---------------------------------------------
-        # CHECK
-        # ---------------------------------------------
-
-        if not dubbing_segments:
-
-            st.error(
-                "❌ Myanmar အသံ ထုတ်၍မရပါ။"
+            temp_full = (
+                work_dir /
+                f"timeline_{index}.wav"
             )
 
-            st.stop()
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
 
+                    "-i",
+                    str(full_audio),
 
-        # ---------------------------------------------
-        # BUILD DUB AUDIO
-        # ---------------------------------------------
+                    "-i",
+                    str(fitted_audio),
 
-        st.info(
-            "🎚️ Myanmar အသံတွေကို "
-            "မူရင်း timing အတိုင်း တည်နေပါသည်..."
-        )
+                    "-filter_complex",
 
-        dubbing_audio = (
-            work_dir /
-            "myanmar_dubbing.m4a"
-        )
+                    (
+                        f"[1:a]"
+                        f"adelay="
+                        f"{int(start_time * 1000)}|"
+                        f"{int(start_time * 1000)}"
+                        f"[delayed];"
+                        f"[0:a][delayed]"
+                        f"amix=inputs=2:"
+                        f"duration=first:"
+                        f"dropout_transition=0"
+                        f"[out]"
+                    ),
 
-        created = create_dubbing_track(
-            duration,
-            dubbing_segments,
-            dubbing_audio,
-        )
+                    "-map",
+                    "[out]",
 
-        if not created:
+                    "-ar",
+                    "44100",
 
-            st.error(
-                "❌ Dubbing audio မတည်နိုင်ပါ။"
+                    "-ac",
+                    "1",
+
+                    str(temp_full)
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
             )
 
-            st.stop()
+            if temp_full.exists():
 
+                full_audio = temp_full
 
-        # ---------------------------------------------
-        # FINAL VIDEO
-        # ---------------------------------------------
+            # ---------------------------------------------
+            # PROGRESS
+            # ---------------------------------------------
 
-        st.info(
-            "🎬 Final Video ပြုလုပ်နေပါသည်..."
+            percent = (
+                35 +
+                int(
+                    ((index + 1) /
+                     len(segments))
+                    * 45
+                )
+            )
+
+            progress.progress(
+                min(percent, 80)
+            )
+
+        # -------------------------------------------------
+        # FINAL AUDIO
+        # -------------------------------------------------
+
+        progress.progress(85)
+
+        status.info(
+            "🎬 Myanmar dubbed audio ကို "
+            "video ထဲထည့်နေပါတယ်..."
         )
 
         final_video = (
@@ -889,27 +707,27 @@ if st.button(
             "Myanmar_Dubbed_Final.mp4"
         )
 
-        created = create_final_video(
+        success = create_final_video(
             input_video,
-            dubbing_audio,
-            final_video,
+            full_audio,
+            final_video
         )
 
-        if not created:
-
-            st.error(
-                "❌ Final Video မထွက်ပါ။"
-            )
-
+        if not success:
             st.stop()
 
+        progress.progress(100)
 
-        # ---------------------------------------------
+        status.success(
+            "🎉 Myanmar Dubbing ပြီးပါပြီ!"
+        )
+
+        # -------------------------------------------------
         # RESULT
-        # ---------------------------------------------
+        # -------------------------------------------------
 
-        st.success(
-            "🎉 မြန်မာ Dubbing အောင်မြင်ပါပြီ!"
+        st.subheader(
+            "🎬 Final Myanmar Dubbed Video"
         )
 
         st.video(
@@ -922,16 +740,14 @@ if st.button(
         ) as f:
 
             st.download_button(
-                "📥 Myanmar Dubbed Video Download",
+                label="⬇️ Myanmar Dubbed Video Download",
                 data=f,
-                file_name=(
-                    "Myanmar_Dubbed_Final.mp4"
-                ),
+                file_name="Myanmar_Dubbed_Final.mp4",
                 mime="video/mp4",
+                use_container_width=True
             )
 
-    except Exception as e:
-
-        st.error(
-            f"❌ Error: {e}"
+        st.success(
+            "✅ မူရင်း Chinese audio ကို မထည့်ထားပါဘူး။ "
+            "Myanmar dubbing audio ကိုပဲ ထည့်ထားပါတယ်။"
         )
