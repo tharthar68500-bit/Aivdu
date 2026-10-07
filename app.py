@@ -211,21 +211,18 @@ if st.button("🚀 ဗီဒီယို (၃) ပုဒ် အလိုအလ�
                     final_result_path = dubbed_output
 
                 st.success(f"✅ {name} Dubbing & Processing အောင်မြင်စွာ ပြီးဆုံးပါပြီ!")
-                st.video(final_result_path)import os
+                    if final_result_path and os.path.exists(final_result_path):
+        st.video(final_result_path)
+        with open(final_result_path, "rb") as file:
+            st.download_button(
+                label="Download Video",
+                data=file,
+                file_name=os.path.basename(final_result_path),
+                mime="video/mp4"
+            )
+    else:
+        st.error(f"ဗီဒီယိုဖိုင် မရှိပါ သို့မဟုတ် ထွက်မလာပါ: {final_result_path}")
 
-if final_result_path and os.path.exists(final_result_path):
-    st.video(final_result_path)
-    
-    # Download Button ပြသခြင်း
-    with open(final_result_path, "rb") as file:
-        st.download_button(
-            label="Download Video",
-            data=file,
-            file_name=os.path.basename(final_result_path),
-            mime="video/mp4"
-        )
-else:
-    st.error(f"ဗီဒီယိုဖိုင် မရှိပါ သို့မဟုတ် ထွက်မလာပါ: {final_result_path}")
 
 
                 # Download Button ပြသခြင်း
