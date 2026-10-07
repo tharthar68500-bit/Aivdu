@@ -1,14 +1,8 @@
 
 streamlit
-elevenlabs
-requests
-numpy
-opencv-python-headless
-ffmpeg-python
-imageio-ffmpeg
-streamlit
-requests
-opencv-python-headless
-numpy
 openai-whisper
 torch
+requests
+numpy
+soundfile
+myanmartts
