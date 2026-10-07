@@ -80,6 +80,9 @@ def apply_blur_to_video(input_path, output_path, blur_y, blur_h):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
 
+    if fps == 0 or np.isnan(fps):
+        fps = 25.0
+
     temp_blur_video = "temp_blurred_no_audio.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(temp_blur_video, fourcc, fps, (width, height))
@@ -210,26 +213,18 @@ if st.button("🚀 ဗီဒီယို (၃) ပုဒ် အလိုအလ�
                 else:
                     final_result_path = dubbed_output
 
-                st.success(f"✅ {name} Dubbing & Processing အောင်မြင်စွာ ပြီးဆုံးပါပြီ!")
-                    if final_result_path and os.path.exists(final_result_path):
-        st.video(final_result_path)
-        with open(final_result_path, "rb") as file:
-            st.download_button(
-                label="Download Video",
-                data=file,
-                file_name=os.path.basename(final_result_path),
-                mime="video/mp4"
-            )
-    else:
-        st.error(f"ဗီဒီယိုဖိုင် မရှိပါ သို့မဟုတ် ထွက်မလာပါ: {final_result_path}")
+                # 安全 Check ဖြင့် Output ဖိုင်ရှိမှ ပြသခြင်း
+                if final_result_path and os.path.exists(final_result_path):
+                    st.success(f"✅ {name} Dubbing & Processing အောင်မြင်စွာ ပြီးဆုံးပါပြီ!")
+                    st.video(final_result_path)
 
-
-
-                # Download Button ပြသခြင်း
-                with open(final_result_path, "rb") as file:
-                    st.download_button(
-                        label=f"📥 {name} ရလဒ် ဒေါင်းလုဒ်ဆွဲရန်",
-                        data=file,
-                        file_name=f"Processed_{name}.mp4",
-                        mime="video/mp4",
-                    )
+                    # Download Button ပြသခြင်း
+                    with open(final_result_path, "rb") as file:
+                        st.download_button(
+                            label=f"📥 {name} ရလဒ် ဒေါင်းလုဒ်ဆွဲရန်",
+                            data=file,
+                            file_name=f"Processed_{name}.mp4",
+                            mime="video/mp4",
+                        )
+                else:
+                    st.error(f"⚠️ {name} ဗီဒီယို ဖိုင်မထွက်လာပါ သို့မဟုတ် လမ်းကြောင်း အဆင်မပြေပါ: {final_result_path}")
